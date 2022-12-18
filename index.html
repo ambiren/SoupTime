@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style>
+            :root {
+                --body-bg: #FFFFFF;
+                --body-color: #000000;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --body-bg: #222222;
+                    --body-color: #e3e3e3;
+                }
+            }
+
+            body {
+                background: var(--body-bg);
+                color: var(--body-color);
+	            line-height: 1.75em;
+            }
+
+            input[type="time"] {
+                width: 8em;
+            }
+
+            #alarmMinutesBefore {
+                width: 2em;
+                text-align: right;
+            }
+
+            .subsettings {
+                margin-left: 25px;
+            }
+
+            .inputGroup {
+                margin-bottom: 8px;
+            }
+
+            div[data-disabled=""] label {
+                opacity: 0.5;
+            }
+        </style>
+        <script src="https://cdn.jsdelivr.net/npm/temporal-polyfill@0.0.8/dist/global.js"></script>
+    </head>
+    <body>
+        <form id="icsForm">
+            <div class="inputGroup">
+                <label for="startDate">Start Date:</label>
+                <input id="startDate" type="date">
+                <br>
+                <label for="endDate">End Date:</label>
+                <input id="endDate" type="date">
+            </div>
+            <div class="inputGroup">
+                <input id="limitTimeRange" type="checkbox">
+                <label for="limitTimeRange">Limit Time Range</label>
+                <div id="limitTimeRangeSettings" class="subsettings" data-disabled>
+                    <label for="minTime">On or after:</label>
+                    <input id="minTime" type="time" value="07:00" disabled>
+                    <br>
+                    <label for="maxTime">And before:</label>
+                    <input id="maxTime" type="time" value="23:30" disabled>
+                </div>
+            </div>
+            <div class="inputGroup">
+                <input id="enableAlarms" type="checkbox">
+                <label for="enableAlarms">Enable Reminders</label>
+                <div id="reminderSettings" class="subsettings" data-disabled>
+                    <input id="alarmMinutesBefore" type="text" inputmode="numeric" pattern="\d*" value="5" disabled>
+                    <label for="alarmMinutesBefore">minutes before event</label>
+                </div>
+            </div>
+            <input type="submit" value="Generate ICS File">
+        </form>
+        <script>
+const { Duration, ZonedDateTime, PlainDateTime, PlainTime } = Temporal;
+
+function elem(id) {
+    return document.getElementById(id);
+}
+
+const icalHeader = `BEGIN:VCALENDAR
+PRODID:-//Ambiren-WrA//NONSGML Soup Time//EN
+VERSION:2.0
+`
+const icalTrailer = "END:VCALENDAR\n";
+
+const epoch = ZonedDateTime.from({
+    timeZone: 'America/New_York',
+    year: 2022,
+    month: 12,
+    day: 16
+}).toInstant();
+
+const timePerReset = Duration.from({ hours: 3, minutes: 30 });
+const secondsPerReset = timePerReset.total("seconds");
+
+function getNextFeastReset(startPoint) {
+    var diffSeconds = startPoint.toInstant().epochSeconds - epoch.epochSeconds;
+    var secondsToReset = secondsPerReset - (diffSeconds % secondsPerReset);
+    var durationToReset = Duration.from({ seconds: secondsToReset });
+    return startPoint.add(durationToReset).round("minute");
+}
+
+function formatICalDate(d) {
+    const year = d.year.toString().padStart(4, '0');
+    const month = d.month.toString().padStart(2, '0');
+    const day = d.day.toString().padStart(2, '0');
+    const hour = d.hour.toString().padStart(2, '0');
+    const minute = d.minute.toString().padStart(2, '0');
+    const second = d.second.toString().padStart(2, '0');
+
+    return `${year}${month}${day}T${hour}${minute}${second}`;
+}
+
+function makeEvent(startDateTime, alarmOffsetMinutes) {
+    const tz = startDateTime.timeZone.id;
+    const uid = crypto.randomUUID();
+    const start = formatICalDate(startDateTime);
+    const end = formatICalDate(startDateTime.add(Duration.from({minutes: 15})));
+    const timestamp = formatICalDate(Temporal.Now.zonedDateTimeISO('UTC'))
+    
+    var event = `BEGIN:VEVENT
+DESCRIPTION:Cook that soup!
+DTSTART;TZID=${tz}:${start}
+DTEND;TZID=${tz}:${end}
+DTSTAMP:${timestamp}Z
+LOCATION:The Azure Span
+SEQUENCE:0
+SUMMARY:Tuskarr Feast
+UID:${uid}
+`
+    if (alarmOffsetMinutes !== null) {
+        event += `BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Soup soon!
+TRIGGER:-PT${alarmOffsetMinutes}M
+END:VALARM
+`
+    }
+
+    return event + "END:VEVENT\n"
+}
+
+function makeTimeInRangeCheck(minTime, maxTime) {
+    const maxTimeAdj = maxTime.subtract(Duration.from({ seconds: 1 }));
+    return PlainTime.compare(minTime, maxTime) == -1
+        ? (time) => PlainTime.compare(minTime, time) != 1 && PlainTime.compare(time, maxTimeAdj) == -1
+        : (time) => PlainTime.compare(minTime, time) != 1 || PlainTime.compare(time, maxTimeAdj) == -1;
+}
+
+function generateIcsFile(form) {
+    const alarmOffsetMinutes = form.enableAlarms.checked
+        ? Math.round(form.alarmMinutesBefore.value)
+        : null;
+    
+    const timeZone = (new Intl.DateTimeFormat()).resolvedOptions().timeZone;
+    const startDate = PlainDateTime.from(form.startDate.value).toZonedDateTime(timeZone);
+    const endDate = PlainDateTime.from(form.endDate.value).withPlainTime(PlainTime.from('23:59:59')).toZonedDateTime(timeZone);
+
+    const limitTimeRange = form.limitTimeRange.checked;
+    
+    const isTimeInRange = limitTimeRange
+        ? makeTimeInRangeCheck(PlainTime.from(form.minTime.value), PlainTime.from(form.maxTime.value))
+        : (time) => true;
+
+    var icalOutput = icalHeader;
+    var feastDate = getNextFeastReset(startDate);
+    while (ZonedDateTime.compare(feastDate, endDate) == -1) {
+        if (isTimeInRange(feastDate.toPlainTime())) {
+            icalOutput += makeEvent(feastDate, alarmOffsetMinutes);
+        }
+
+        feastDate = feastDate.add(timePerReset).round("minute");
+    }
+
+    icalOutput += icalTrailer;
+    return icalOutput;
+}
+
+function saveToFile(filename, text) {
+    var element = document.createElement('a');
+    element.setAttribute('href', 'data:text/calendar;charset=utf-8,' + encodeURIComponent(text));
+    element.setAttribute('download', filename);
+
+    element.style.display = 'none';
+    document.body.appendChild(element);
+
+    element.click();
+
+    document.body.removeChild(element);
+}
+
+const today = Temporal.Now.plainDateISO();
+elem("startDate").value = today.toString();
+elem("endDate").value = today.add(Duration.from({days: 6})).toString();
+
+elem("limitTimeRange").addEventListener("change", (event) => {
+    if (event.target.checked) {
+        elem("limitTimeRangeSettings").removeAttribute("data-disabled");
+        elem("minTime").removeAttribute("disabled");
+        elem("maxTime").removeAttribute("disabled");
+    }
+    else {
+        elem("limitTimeRangeSettings").setAttribute("data-disabled", "");
+        elem("minTime").setAttribute("disabled", "");
+        elem("maxTime").setAttribute("disabled", "");
+    }
+});
+
+elem("enableAlarms").addEventListener("change", (event) =>
+{
+    if (event.target.checked) {
+        elem("reminderSettings").removeAttribute("data-disabled");
+        elem("alarmMinutesBefore").removeAttribute("disabled");
+    }
+    else {
+        elem("reminderSettings").setAttribute("data-disabled", "");
+        elem("alarmMinutesBefore").setAttribute("disabled", "");
+    }
+});
+
+elem("icsForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const icsData = generateIcsFile(event.target);
+    saveToFile("wow-soup.ics", icsData);
+});
+        </script>
+    </body>
+</html>
